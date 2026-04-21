@@ -1,0 +1,345 @@
+//@version=6
+// ============================================================================
+// XAU/USD AI Trading Assistant
+// ============================================================================
+// Type:        Strategy (1H XAU/USD)
+// Architecture: Multi-indicator confidence scoring → ATR risk management
+//               → Event protection → Daily circuit breaker → JSON alerts
+//
+// Signal scoring: 8 indicator groups, raw score -20 to +20, normalised 0-100
+// BUY  = confidence ≥ buy_threshold (default 60)
+// SELL = confidence ≤ sell_threshold (default 40)
+// HOLD = between thresholds
+// ============================================================================
+
+strategy("XAU/USD AI Trading Assistant",
+         shorttitle        = "XAU-AI",
+         overlay           = true,
+         default_qty_type  = strategy.fixed,
+         default_qty_value = 1,
+         initial_capital   = 100000,
+         currency          = currency.USD,
+         calc_on_every_tick = false)
+
+// ============================================================================
+// INPUTS — Signal Settings
+// ============================================================================
+ema_fast  = input.int(20,    "EMA Fast",              minval=5,   maxval=50,   group="Signal Settings")
+ema_mid   = input.int(50,    "EMA Mid",               minval=10,  maxval=200,  group="Signal Settings")
+ema_slow  = input.int(200,   "EMA Slow",              minval=50,  maxval=500,  group="Signal Settings")
+rsi_len   = input.int(14,    "RSI Length",            minval=2,   maxval=50,   group="Signal Settings")
+rsi_ob    = input.int(70,    "RSI Overbought",        minval=60,  maxval=90,   group="Signal Settings")
+rsi_os    = input.int(30,    "RSI Oversold",          minval=10,  maxval=40,   group="Signal Settings")
+adx_len   = input.int(14,    "ADX Length",            minval=5,   maxval=30,   group="Signal Settings")
+adx_thr   = input.int(25,    "ADX Min Strength",      minval=10,  maxval=50,   group="Signal Settings", tooltip="ADX must exceed this to confirm trend-based signals")
+macd_fast = input.int(12,    "MACD Fast",             minval=2,   maxval=30,   group="Signal Settings")
+macd_slow = input.int(26,    "MACD Slow",             minval=5,   maxval=60,   group="Signal Settings")
+macd_sig  = input.int(9,     "MACD Signal",           minval=2,   maxval=20,   group="Signal Settings")
+bb_len    = input.int(20,    "BB Length",             minval=5,   maxval=100,  group="Signal Settings")
+bb_mult   = input.float(2.0, "BB StdDev",             minval=0.5, maxval=4.0,  step=0.1, group="Signal Settings")
+cci_len   = input.int(20,    "CCI Length",            minval=5,   maxval=50,   group="Signal Settings")
+stoch_len = input.int(14,    "Stoch Length",          minval=5,   maxval=30,   group="Signal Settings")
+stoch_k   = input.int(3,     "Stoch %K Smooth",       minval=1,   maxval=10,   group="Signal Settings")
+stoch_d   = input.int(3,     "Stoch %D Smooth",       minval=1,   maxval=10,   group="Signal Settings")
+buy_thr   = input.int(60,    "Buy Confidence %",      minval=51,  maxval=90,   group="Signal Settings", tooltip="BUY fires when confidence exceeds this level")
+sell_thr  = input.int(40,    "Sell Confidence %",     minval=10,  maxval=49,   group="Signal Settings", tooltip="SELL fires when confidence is below this level")
+
+// ============================================================================
+// INPUTS — Risk Management
+// ============================================================================
+sl_mult   = input.float(2.0, "SL ATR Multiplier",    minval=0.5, maxval=10.0, step=0.1,  group="Risk Management", tooltip="Stop loss = entry ± ATR × multiplier")
+rr_ratio  = input.float(2.0, "Risk:Reward Ratio",    minval=0.5, maxval=10.0, step=0.1,  group="Risk Management", tooltip="TP = SL distance × R:R ratio")
+risk_pct  = input.float(1.0, "Risk Per Trade %",     minval=0.1, maxval=10.0, step=0.1,  group="Risk Management", tooltip="% of equity risked per trade (used for position sizing display)")
+max_lots  = input.float(5.0, "Max Position (lots)",  minval=0.01, maxval=100, step=0.01, group="Risk Management")
+trail_m   = input.float(1.5, "Trail ATR Multiplier", minval=0.5, maxval=5.0,  step=0.1,  group="Risk Management", tooltip="When a confirming signal fires on an open position, SL moves to entry ± ATR × this")
+
+// ============================================================================
+// INPUTS — Event Protection
+// ============================================================================
+en_events = input.bool(true,  "Enable Event Protection",  group="Event Protection", tooltip="Block new entries during NFP/FOMC blackout window (Fri 12:30-14:00 UTC)")
+close_ev  = input.bool(true,  "Close Positions on Event", group="Event Protection", tooltip="Close any open position when entering the blackout window")
+
+// ============================================================================
+// INPUTS — Circuit Breaker
+// ============================================================================
+max_dd    = input.float(3.0,  "Max Daily Loss %",         minval=0.1, maxval=20.0, step=0.1, group="Circuit Breaker", tooltip="All trading halts for the day once this drawdown level is breached")
+
+// ============================================================================
+// INPUTS — Display
+// ============================================================================
+show_sigs = input.bool(true,  "Show Entry Signals",       group="Display")
+show_sltp = input.bool(true,  "Show SL/TP Lines",         group="Display")
+show_tbl  = input.bool(true,  "Show Confidence Table",    group="Display")
+show_dbg  = input.bool(false, "Show Debug Score",         group="Display")
+
+// ============================================================================
+// INDICATOR CALCULATIONS
+// ============================================================================
+ema20  = ta.ema(close, ema_fast)
+ema50  = ta.ema(close, ema_mid)
+ema200 = ta.ema(close, ema_slow)
+atrVal = ta.atr(14)
+atrSma = ta.sma(atrVal, 20)
+rsiVal = ta.rsi(close, rsi_len)
+
+[macdLine, sigLine, histLine] = ta.macd(close, macd_fast, macd_slow, macd_sig)
+[bbBasis, bbUpper, bbLower]   = ta.bb(close, bb_len, bb_mult)
+[diPlus, diMinus, adxValue]   = ta.dmi(adx_len, adx_len)
+
+cciVal    = ta.cci(close, cci_len)
+stochRaw  = ta.stoch(rsiVal, rsiVal, rsiVal, stoch_len)
+stochK    = ta.sma(stochRaw, stoch_k)
+stochD    = ta.sma(stochK, stoch_d)
+vwapVal   = ta.vwap
+
+// ============================================================================
+// SIGNAL SCORING
+// Raw range: -20 to +20  →  normalised 0-100 via: (score + 20) / 40 * 100
+// ============================================================================
+
+// --- Trend group (max ±7) ---
+bool emaFullBull = close > ema20 and ema20 > ema50 and ema50 > ema200
+bool emaFullBear = close < ema20 and ema20 < ema50 and ema50 < ema200
+bool emaPBull    = not emaFullBull and close > ema20 and ema20 > ema50
+bool emaPBear    = not emaFullBear and close < ema20 and ema20 < ema50
+bool adxBull     = adxValue > adx_thr and diPlus > diMinus
+bool adxBear     = adxValue > adx_thr and diMinus > diPlus
+
+// --- Momentum group: MACD (max ±3) ---
+bool macdXUp   = ta.crossover(histLine, 0)
+bool macdXDown = ta.crossunder(histLine, 0)
+bool macdBull  = histLine > 0
+bool macdBear  = histLine < 0
+
+// --- Momentum group: RSI (max ±3) ---
+bool rsiBull  = rsiVal < rsi_os
+bool rsiBear  = rsiVal > rsi_ob
+bool rsiNBull = not rsiBull and rsiVal < 50
+bool rsiNBear = not rsiBear and rsiVal > 50
+
+// --- Momentum group: StochRSI (max ±2) ---
+bool stochBull = ta.crossover(stochK, stochD) and stochK < 25
+bool stochBear = ta.crossunder(stochK, stochD) and stochK > 75
+
+// --- Momentum group: CCI (max ±2) ---
+bool cciBull = cciVal > 100
+bool cciBear = cciVal < -100
+
+// --- Structure group: Bollinger Bands (max ±3) ---
+bool bbBounceBull = low[1] <= bbLower[1] and close > bbLower
+bool bbBounceBear = high[1] >= bbUpper[1] and close < bbUpper
+bool bbZoneBull   = not bbBounceBull and close < bbBasis
+bool bbZoneBear   = not bbBounceBear and close > bbBasis
+
+// --- Structure group: VWAP (max ±1) ---
+bool vwapBull = close > vwapVal
+bool vwapBear = close < vwapVal
+
+// Accumulate (each line is a single ternary expression)
+float score = 0.0
+score += emaFullBull ? 3.0 : emaFullBear ? -3.0 : emaPBull ? 1.0 : emaPBear ? -1.0 : 0.0
+score += adxBull ? 2.0 : adxBear ? -2.0 : 0.0
+score += macdXUp ? 3.0 : macdXDown ? -3.0 : macdBull ? 1.0 : macdBear ? -1.0 : 0.0
+score += rsiBull ? 3.0 : rsiBear ? -3.0 : rsiNBull ? 1.0 : rsiNBear ? -1.0 : 0.0
+score += stochBull ? 2.0 : stochBear ? -2.0 : 0.0
+score += cciBull ? 2.0 : cciBear ? -2.0 : 0.0
+score += bbBounceBull ? 3.0 : bbBounceBear ? -3.0 : bbZoneBull ? 1.0 : bbZoneBear ? -1.0 : 0.0
+score += vwapBull ? 1.0 : vwapBear ? -1.0 : 0.0
+
+float confidence = math.max(0.0, math.min(100.0, math.round((score + 20.0) / 40.0 * 100.0)))
+
+bool sigBuy  = confidence >= buy_thr  and barstate.isconfirmed
+bool sigSell = confidence <= sell_thr and barstate.isconfirmed
+
+// ============================================================================
+// EVENT PROTECTION — NFP Blackout: Fridays 12:30–14:00 UTC
+// ============================================================================
+bool inBlackout = en_events and not na(time(timeframe.period, "1230-1400:6", "UTC"))
+
+// ============================================================================
+// DAILY CIRCUIT BREAKER
+// ============================================================================
+var float dayStartEq = na
+var bool  tradHalted = false
+var float dayMaxDd   = 0.0
+var bool  cbFired    = false
+
+bool newDay = bar_index == 0 or (not na(dayofmonth[1]) and dayofmonth != dayofmonth[1])
+
+if newDay
+    dayStartEq := strategy.equity
+    tradHalted := false
+    dayMaxDd   := 0.0
+    cbFired    := false
+
+float curDd = na(dayStartEq) or dayStartEq <= 0 ? 0.0 : math.max(0.0, (dayStartEq - strategy.equity) / dayStartEq * 100.0)
+dayMaxDd := math.max(dayMaxDd, curDd)
+
+if curDd >= max_dd and not tradHalted
+    tradHalted := true
+    cbFired    := true
+
+bool canTrade = not tradHalted and not inBlackout and barstate.isconfirmed
+
+// ============================================================================
+// POSITION STATE & SIZING
+// ============================================================================
+bool isFlat  = strategy.position_size == 0
+bool isLong  = strategy.position_size > 0
+bool isShort = strategy.position_size < 0
+
+float slDist = atrVal * sl_mult
+float tpDist = slDist * rr_ratio
+
+// Position size derived from risk % (informational — adjust to your broker's lot conventions)
+float riskAmt = strategy.equity * risk_pct / 100.0
+float rawQty  = slDist > 0 ? riskAmt / slDist : 0.01
+float posQty  = math.min(math.max(math.round(rawQty * 100) / 100, 0.01), max_lots)
+
+// ============================================================================
+// TRADE EXECUTION
+// ============================================================================
+var float slPx = na
+var float tpPx = na
+
+// Force-close on blackout or circuit breaker
+if (inBlackout and close_ev or tradHalted) and not isFlat
+    strategy.close_all(inBlackout ? "Event Blackout" : "Circuit Breaker")
+
+// Long entry
+if canTrade and sigBuy and isFlat
+    slPx := close - slDist
+    tpPx := close + tpDist
+    strategy.entry("Long", strategy.long, qty=posQty,
+         comment="BUY " + str.tostring(confidence, "#") + "%")
+    strategy.exit("LongExit", "Long", stop=slPx, limit=tpPx)
+
+// Short entry
+if canTrade and sigSell and isFlat
+    slPx := close + slDist
+    tpPx := close - tpDist
+    strategy.entry("Short", strategy.short, qty=posQty,
+         comment="SELL " + str.tostring(confidence, "#") + "%")
+    strategy.exit("ShortExit", "Short", stop=slPx, limit=tpPx)
+
+// Opposite signal → close immediately
+if canTrade and sigSell and isLong
+    strategy.close("Long", comment="Opposite Signal")
+
+if canTrade and sigBuy and isShort
+    strategy.close("Short", comment="Opposite Signal")
+
+// Confirming signal → trail stop (tighten only, never widen)
+if canTrade and sigBuy and isLong and not na(slPx)
+    float trailSl = close - atrVal * trail_m
+    if trailSl > slPx
+        slPx := trailSl
+        strategy.exit("LongExit", "Long", stop=slPx, limit=tpPx)
+
+if canTrade and sigSell and isShort and not na(slPx)
+    float trailSl = close + atrVal * trail_m
+    if trailSl < slPx
+        slPx := trailSl
+        strategy.exit("ShortExit", "Short", stop=slPx, limit=tpPx)
+
+// ============================================================================
+// PLOTS — EMA lines
+// ============================================================================
+plot(ema20,  "EMA 20",  color=color.blue,              linewidth=1)
+plot(ema50,  "EMA 50",  color=color.orange,            linewidth=1)
+plot(ema200, "EMA 200", color=color.red,               linewidth=2)
+
+// Signal markers
+plotshape(show_sigs and sigBuy,  "BUY",  shape.triangleup,   location.belowbar, color.new(color.green, 0), size=size.small)
+plotshape(show_sigs and sigSell, "SELL", shape.triangledown, location.abovebar, color.new(color.red, 0),   size=size.small)
+
+// SL / TP levels for open position
+plot(show_sltp and isLong  and not na(slPx) ? slPx : na, "Long SL",  color=color.new(color.red,   20), linewidth=1, style=plot.style_linebr)
+plot(show_sltp and isLong  and not na(tpPx) ? tpPx : na, "Long TP",  color=color.new(color.green, 20), linewidth=1, style=plot.style_linebr)
+plot(show_sltp and isShort and not na(slPx) ? slPx : na, "Short SL", color=color.new(color.red,   20), linewidth=1, style=plot.style_linebr)
+plot(show_sltp and isShort and not na(tpPx) ? tpPx : na, "Short TP", color=color.new(color.green, 20), linewidth=1, style=plot.style_linebr)
+
+// Background tint
+bgcolor(inBlackout ? color.new(color.orange, 88) : na, title="Event Blackout BG")
+bgcolor(tradHalted ? color.new(color.red,    88) : na, title="Circuit Breaker BG")
+
+// ============================================================================
+// CONFIDENCE TABLE (top-right)
+// ============================================================================
+var table tbl = table.new(position.top_right, 2, 8,
+     bgcolor=color.new(color.black, 15),
+     border_width=1,
+     border_color=color.new(color.gray, 60))
+
+if show_tbl and barstate.islast
+    color  sigCol  = sigBuy ? color.lime : sigSell ? color.red : color.gray
+    string sigTxt  = sigBuy ? "BUY" : sigSell ? "SELL" : "HOLD"
+    color  stCol   = tradHalted ? color.red : inBlackout ? color.orange : color.new(color.lime, 20)
+    string stTxt   = tradHalted ? "HALTED" : inBlackout ? "BLACKOUT" : "ACTIVE"
+    color  ddCol   = curDd > max_dd * 0.8 ? color.red : curDd > max_dd * 0.5 ? color.orange : color.white
+
+    table.cell(tbl, 0, 0, "XAU/USD AI",   text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy,  10))
+    table.cell(tbl, 1, 0, "1H Strategy",  text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy,  10))
+    table.cell(tbl, 0, 1, "Signal",       text_color=color.gray,  text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(tbl, 1, 1, sigTxt,         text_color=sigCol,      text_size=size.normal, bgcolor=color.new(sigCol, 75))
+    table.cell(tbl, 0, 2, "Confidence",   text_color=color.gray,  text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(tbl, 1, 2, str.tostring(confidence, "#") + "%", text_color=color.white, text_size=size.small, bgcolor=color.new(sigCol, 75))
+    table.cell(tbl, 0, 3, "Status",       text_color=color.gray,  text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(tbl, 1, 3, stTxt,          text_color=color.white, text_size=size.small, bgcolor=color.new(stCol, 50))
+    table.cell(tbl, 0, 4, "Daily DD",     text_color=color.gray,  text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(tbl, 1, 4, str.tostring(curDd, "#.##") + "%", text_color=ddCol, text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(tbl, 0, 5, "ATR",          text_color=color.gray,  text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(tbl, 1, 5, str.tostring(atrVal, "#.##"), text_color=color.white, text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(tbl, 0, 6, "SL Dist",      text_color=color.gray,  text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(tbl, 1, 6, str.tostring(slDist, "#.##"), text_color=color.white, text_size=size.small, bgcolor=color.new(color.black, 30))
+    if show_dbg
+        table.cell(tbl, 0, 7, "Raw Score",    text_color=color.gray,   text_size=size.tiny, bgcolor=color.new(color.black, 30))
+        table.cell(tbl, 1, 7, str.tostring(score, "#.0") + " / 20", text_color=color.yellow, text_size=size.tiny, bgcolor=color.new(color.black, 30))
+
+// ============================================================================
+// ALERTS — JSON Auto Journaling
+// ============================================================================
+
+// Reason fragments (each on one line)
+string rEma   = emaFullBull ? "EMA full bull stack" : emaFullBear ? "EMA full bear stack" : emaPBull ? "EMA partial bull" : emaPBear ? "EMA partial bear" : "EMA mixed"
+string rRsi   = rsiBull ? ", RSI oversold bounce" : rsiBear ? ", RSI overbought" : ""
+string rBb    = bbBounceBull ? ", BB lower band bounce" : bbBounceBear ? ", BB upper band bounce" : ""
+string rMacd  = macdXUp ? ", MACD histogram cross up" : macdXDown ? ", MACD histogram cross down" : ""
+string rStoch = stochBull ? ", StochRSI bullish cross" : stochBear ? ", StochRSI bearish cross" : ""
+string reason = rEma + rRsi + rBb + rMacd + rStoch
+
+// JSON fragments — kept short to avoid line-length issues
+string jTime  = str.format_time(time, "yyyy-MM-dd HH:mm", "UTC")
+string jAtr   = str.tostring(atrVal, "#.##")
+string jConf  = str.tostring(confidence, "#")
+string jSl    = str.tostring(close - slDist, "#.##")
+string jTp    = str.tostring(close + tpDist, "#.##")
+string jSlS   = str.tostring(close + slDist, "#.##")
+string jTpS   = str.tostring(close - tpDist, "#.##")
+string jDd    = str.tostring(curDd, "#.##")
+string jMaxDd = str.tostring(dayMaxDd, "#.##")
+
+string buyMsg  = '{"type":"ENTRY","signal":"BUY","confidence":' + jConf + ',"sl":' + jSl + ',"tp":' + jTp + ',"atr":' + jAtr + ',"reason":"' + reason + '","time":"' + jTime + '"}'
+string sellMsg = '{"type":"ENTRY","signal":"SELL","confidence":' + jConf + ',"sl":' + jSlS + ',"tp":' + jTpS + ',"atr":' + jAtr + ',"reason":"' + reason + '","time":"' + jTime + '"}'
+string cbMsg   = '{"type":"CIRCUIT_BREAKER","daily_dd":' + jDd + ',"max_allowed":' + str.tostring(max_dd, "#.##") + ',"time":"' + jTime + '"}'
+string blMsg   = '{"type":"BLACKOUT","reason":"High-impact event window","time":"' + jTime + '"}'
+string dayMsg  = '{"type":"DAILY_SUMMARY","pnl_pct":' + str.tostring(na(dayStartEq) or dayStartEq <= 0 ? 0.0 : (strategy.equity - dayStartEq) / dayStartEq * 100, "#.##") + ',"max_drawdown_pct":' + jMaxDd + ',"circuit_breaker_triggered":' + str.tostring(cbFired) + ',"time":"' + jTime + '"}'
+
+// Configurable alert conditions (set up in TradingView Alerts dialog)
+alertcondition(sigBuy  and canTrade,  "BUY Signal",       "XAU-AI: BUY signal fired")
+alertcondition(sigSell and canTrade,  "SELL Signal",      "XAU-AI: SELL signal fired")
+alertcondition(cbFired,               "Circuit Breaker",  "XAU-AI: Daily drawdown limit hit")
+alertcondition(inBlackout,            "Event Blackout",   "XAU-AI: Entering high-impact event window")
+
+// Dynamic alerts (fire automatically when conditions trigger)
+if sigBuy and canTrade
+    alert(buyMsg, alert.freq_once_per_bar_close)
+
+if sigSell and canTrade
+    alert(sellMsg, alert.freq_once_per_bar_close)
+
+if cbFired and tradHalted and barstate.isconfirmed
+    alert(cbMsg, alert.freq_once_per_bar_close)
+
+if ta.change(dayofmonth) != 0 and bar_index > 0
+    alert(dayMsg, alert.freq_once_per_bar_close)
