@@ -31,7 +31,7 @@ rsi_len   = input.int(14,    "RSI Length",            minval=2,   maxval=50,   g
 rsi_ob    = input.int(70,    "RSI Overbought",        minval=60,  maxval=90,   group="Signal Settings")
 rsi_os    = input.int(30,    "RSI Oversold",          minval=10,  maxval=40,   group="Signal Settings")
 adx_len   = input.int(14,    "ADX Length",            minval=5,   maxval=30,   group="Signal Settings")
-adx_thr   = input.int(25,    "ADX Min Strength",      minval=10,  maxval=50,   group="Signal Settings", tooltip="ADX must exceed this to confirm trend-based signals")
+adx_thr   = input.int(25,    "ADX Min Strength",      minval=10,  maxval=50,   group="Signal Settings", tooltip="Used when Param Set = 0 (manual). Ignored when a preset is active.")
 macd_fast = input.int(12,    "MACD Fast",             minval=2,   maxval=30,   group="Signal Settings")
 macd_slow = input.int(26,    "MACD Slow",             minval=5,   maxval=60,   group="Signal Settings")
 macd_sig  = input.int(9,     "MACD Signal",           minval=2,   maxval=20,   group="Signal Settings")
@@ -41,14 +41,14 @@ cci_len   = input.int(20,    "CCI Length",            minval=5,   maxval=50,   g
 stoch_len = input.int(14,    "Stoch Length",          minval=5,   maxval=30,   group="Signal Settings")
 stoch_k   = input.int(3,     "Stoch %K Smooth",       minval=1,   maxval=10,   group="Signal Settings")
 stoch_d   = input.int(3,     "Stoch %D Smooth",       minval=1,   maxval=10,   group="Signal Settings")
-buy_thr   = input.int(60,    "Buy Confidence %",      minval=51,  maxval=90,   group="Signal Settings", tooltip="BUY fires when confidence exceeds this level")
-sell_thr  = input.int(40,    "Sell Confidence %",     minval=10,  maxval=49,   group="Signal Settings", tooltip="SELL fires when confidence is below this level")
+buy_thr   = input.int(60,    "Buy Confidence %",      minval=51,  maxval=90,   group="Signal Settings", tooltip="Used when Param Set = 0 (manual). Ignored when a preset is active.")
+sell_thr  = input.int(40,    "Sell Confidence %",     minval=10,  maxval=49,   group="Signal Settings", tooltip="Used when Param Set = 0 (manual). Ignored when a preset is active.")
 
 // ============================================================================
 // INPUTS — Risk Management
 // ============================================================================
-sl_mult   = input.float(2.0, "SL ATR Multiplier",    minval=0.5, maxval=10.0, step=0.1,  group="Risk Management", tooltip="Stop loss = entry ± ATR × multiplier")
-rr_ratio  = input.float(2.0, "Risk:Reward Ratio",    minval=0.5, maxval=10.0, step=0.1,  group="Risk Management", tooltip="TP = SL distance × R:R ratio")
+sl_mult   = input.float(2.0, "SL ATR Multiplier",    minval=0.5, maxval=10.0, step=0.1,  group="Risk Management", tooltip="Used when Param Set = 0 (manual). Ignored when a preset is active.")
+rr_ratio  = input.float(2.0, "Risk:Reward Ratio",    minval=0.5, maxval=10.0, step=0.1,  group="Risk Management", tooltip="Used when Param Set = 0 (manual). Ignored when a preset is active.")
 risk_pct  = input.float(1.0, "Risk Per Trade %",     minval=0.1, maxval=10.0, step=0.1,  group="Risk Management", tooltip="% of equity risked per trade (used for position sizing display)")
 max_lots  = input.float(5.0, "Max Position (lots)",  minval=0.01, maxval=100, step=0.01, group="Risk Management")
 trail_m   = input.float(1.5, "Trail ATR Multiplier", minval=0.5, maxval=5.0,  step=0.1,  group="Risk Management", tooltip="When a confirming signal fires on an open position, SL moves to entry ± ATR × this")
@@ -71,6 +71,178 @@ show_sigs = input.bool(true,  "Show Entry Signals",       group="Display")
 show_sltp = input.bool(true,  "Show SL/TP Lines",         group="Display")
 show_tbl  = input.bool(true,  "Show Confidence Table",    group="Display")
 show_dbg  = input.bool(false, "Show Debug Score",         group="Display")
+
+// ============================================================================
+// INPUTS — Optimization
+// ============================================================================
+paramSet  = input.int(0, "Param Set (0=manual, 1-20=preset)", minval=0, maxval=20, group="Optimization",
+     tooltip="0 = use manual inputs above.\n1-20 = fixed preset combinations for parameter sweep.\nChange this number, record Strategy Tester results, repeat.")
+
+// ============================================================================
+// PRESET PARAMETER RESOLUTION
+// Set 0  = manual inputs
+// Sets 1-20 = fixed presets sweeping confidence, SL, RR, ADX
+// ============================================================================
+
+//  #  | Name            | BuyThr | SellThr | SL   | RR   | ADX
+//  1  | Baseline        |  60    |  40     | 2.0  | 2.0  | 25
+//  2  | High Conf       |  65    |  35     | 2.0  | 2.0  | 25
+//  3  | Max Conf        |  70    |  30     | 2.0  | 2.0  | 25
+//  4  | Low Conf        |  55    |  45     | 2.0  | 2.0  | 25
+//  5  | Loose Conf      |  50    |  50     | 2.0  | 2.0  | 25
+//  6  | Tight SL        |  60    |  40     | 1.5  | 2.0  | 25
+//  7  | Wide SL         |  60    |  40     | 2.5  | 2.0  | 25
+//  8  | Widest SL       |  60    |  40     | 3.0  | 2.0  | 25
+//  9  | Low RR          |  60    |  40     | 2.0  | 1.5  | 25
+//  10 | High RR         |  60    |  40     | 2.0  | 2.5  | 25
+//  11 | Max RR          |  60    |  40     | 2.0  | 3.0  | 25
+//  12 | Low ADX         |  60    |  40     | 2.0  | 2.0  | 20
+//  13 | High ADX        |  60    |  40     | 2.0  | 2.0  | 30
+//  14 | Sel+High RR     |  65    |  35     | 2.0  | 2.5  | 25
+//  15 | Sel+Low ADX     |  65    |  35     | 2.0  | 2.0  | 20
+//  16 | Sel+High ADX    |  65    |  35     | 2.0  | 2.0  | 30
+//  17 | Aggressive      |  55    |  45     | 1.5  | 1.5  | 20
+//  18 | Conservative    |  70    |  30     | 2.5  | 2.5  | 30
+//  19 | Balanced        |  65    |  35     | 2.0  | 2.5  | 25
+//  20 | Ultra Select    |  70    |  30     | 2.5  | 3.0  | 30
+
+string presetName = switch paramSet
+    1  => "Baseline"
+    2  => "High Conf"
+    3  => "Max Conf"
+    4  => "Low Conf"
+    5  => "Loose Conf"
+    6  => "Tight SL"
+    7  => "Wide SL"
+    8  => "Widest SL"
+    9  => "Low RR"
+    10 => "High RR"
+    11 => "Max RR"
+    12 => "Low ADX"
+    13 => "High ADX"
+    14 => "Sel+High RR"
+    15 => "Sel+Low ADX"
+    16 => "Sel+High ADX"
+    17 => "Aggressive"
+    18 => "Conservative"
+    19 => "Balanced"
+    20 => "Ultra Select"
+    => "Manual"
+
+int eff_buy = switch paramSet
+    1  => 60
+    2  => 65
+    3  => 70
+    4  => 55
+    5  => 50
+    6  => 60
+    7  => 60
+    8  => 60
+    9  => 60
+    10 => 60
+    11 => 60
+    12 => 60
+    13 => 60
+    14 => 65
+    15 => 65
+    16 => 65
+    17 => 55
+    18 => 70
+    19 => 65
+    20 => 70
+    => buy_thr
+
+int eff_sell = switch paramSet
+    1  => 40
+    2  => 35
+    3  => 30
+    4  => 45
+    5  => 50
+    6  => 40
+    7  => 40
+    8  => 40
+    9  => 40
+    10 => 40
+    11 => 40
+    12 => 40
+    13 => 40
+    14 => 35
+    15 => 35
+    16 => 35
+    17 => 45
+    18 => 30
+    19 => 35
+    20 => 30
+    => sell_thr
+
+float eff_sl = switch paramSet
+    1  => 2.0
+    2  => 2.0
+    3  => 2.0
+    4  => 2.0
+    5  => 2.0
+    6  => 1.5
+    7  => 2.5
+    8  => 3.0
+    9  => 2.0
+    10 => 2.0
+    11 => 2.0
+    12 => 2.0
+    13 => 2.0
+    14 => 2.0
+    15 => 2.0
+    16 => 2.0
+    17 => 1.5
+    18 => 2.5
+    19 => 2.0
+    20 => 2.5
+    => sl_mult
+
+float eff_rr = switch paramSet
+    1  => 2.0
+    2  => 2.0
+    3  => 2.0
+    4  => 2.0
+    5  => 2.0
+    6  => 2.0
+    7  => 2.0
+    8  => 2.0
+    9  => 1.5
+    10 => 2.5
+    11 => 3.0
+    12 => 2.0
+    13 => 2.0
+    14 => 2.5
+    15 => 2.0
+    16 => 2.0
+    17 => 1.5
+    18 => 2.5
+    19 => 2.5
+    20 => 3.0
+    => rr_ratio
+
+int eff_adx = switch paramSet
+    1  => 25
+    2  => 25
+    3  => 25
+    4  => 25
+    5  => 25
+    6  => 25
+    7  => 25
+    8  => 25
+    9  => 25
+    10 => 25
+    11 => 25
+    12 => 20
+    13 => 30
+    14 => 25
+    15 => 20
+    16 => 30
+    17 => 20
+    18 => 30
+    19 => 25
+    20 => 30
+    => adx_thr
 
 // ============================================================================
 // INDICATOR CALCULATIONS
@@ -102,8 +274,8 @@ bool emaFullBull = close > ema20 and ema20 > ema50 and ema50 > ema200
 bool emaFullBear = close < ema20 and ema20 < ema50 and ema50 < ema200
 bool emaPBull    = not emaFullBull and close > ema20 and ema20 > ema50
 bool emaPBear    = not emaFullBear and close < ema20 and ema20 < ema50
-bool adxBull     = adxValue > adx_thr and diPlus > diMinus
-bool adxBear     = adxValue > adx_thr and diMinus > diPlus
+bool adxBull     = adxValue > eff_adx and diPlus > diMinus
+bool adxBear     = adxValue > eff_adx and diMinus > diPlus
 
 // --- Momentum group: MACD (max ±3) ---
 bool macdXUp   = ta.crossover(histLine, 0)
@@ -148,8 +320,8 @@ score += vwapBull ? 1.0 : vwapBear ? -1.0 : 0.0
 
 float confidence = math.max(0.0, math.min(100.0, math.round((score + 20.0) / 40.0 * 100.0)))
 
-bool sigBuy  = confidence >= buy_thr  and barstate.isconfirmed
-bool sigSell = confidence <= sell_thr and barstate.isconfirmed
+bool sigBuy  = confidence >= eff_buy  and barstate.isconfirmed
+bool sigSell = confidence <= eff_sell and barstate.isconfirmed
 
 // ============================================================================
 // EVENT PROTECTION — NFP Blackout: Fridays 12:30–14:00 UTC
@@ -188,8 +360,8 @@ bool isFlat  = strategy.position_size == 0
 bool isLong  = strategy.position_size > 0
 bool isShort = strategy.position_size < 0
 
-float slDist = atrVal * sl_mult
-float tpDist = slDist * rr_ratio
+float slDist = atrVal * eff_sl
+float tpDist = slDist * eff_rr
 
 // Position size derived from risk % (informational — adjust to your broker's lot conventions)
 float riskAmt = strategy.equity * risk_pct / 100.0
@@ -297,6 +469,31 @@ if show_tbl and barstate.islast
         table.cell(tbl, 1, 7, str.tostring(score, "#.0") + " / 20", text_color=color.yellow, text_size=size.tiny, bgcolor=color.new(color.black, 30))
 
 // ============================================================================
+// PRESET TABLE (top-left) — shows active parameter set for easy recording
+// ============================================================================
+var table ptbl = table.new(position.top_left, 2, 7,
+     bgcolor=color.new(color.black, 15),
+     border_width=1,
+     border_color=color.new(color.gray, 60))
+
+if show_tbl and barstate.islast
+    color pHdr = paramSet == 0 ? color.new(color.gray, 20) : color.new(color.teal, 20)
+    string setLabel = paramSet == 0 ? "SET 0 — Manual" : "SET " + str.tostring(paramSet) + " — " + presetName
+    table.cell(ptbl, 0, 0, setLabel,        text_color=color.white, text_size=size.small, bgcolor=pHdr, colspan=2)
+    table.cell(ptbl, 0, 1, "Buy Thr",       text_color=color.gray,  text_size=size.tiny,  bgcolor=color.new(color.black, 30))
+    table.cell(ptbl, 1, 1, str.tostring(eff_buy) + "%", text_color=color.lime, text_size=size.tiny, bgcolor=color.new(color.black, 30))
+    table.cell(ptbl, 0, 2, "Sell Thr",      text_color=color.gray,  text_size=size.tiny,  bgcolor=color.new(color.black, 30))
+    table.cell(ptbl, 1, 2, str.tostring(eff_sell) + "%", text_color=color.red, text_size=size.tiny, bgcolor=color.new(color.black, 30))
+    table.cell(ptbl, 0, 3, "SL Mult",       text_color=color.gray,  text_size=size.tiny,  bgcolor=color.new(color.black, 30))
+    table.cell(ptbl, 1, 3, str.tostring(eff_sl, "#.#") + "×", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.black, 30))
+    table.cell(ptbl, 0, 4, "RR Ratio",      text_color=color.gray,  text_size=size.tiny,  bgcolor=color.new(color.black, 30))
+    table.cell(ptbl, 1, 4, "1:" + str.tostring(eff_rr, "#.#"), text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.black, 30))
+    table.cell(ptbl, 0, 5, "ADX Min",       text_color=color.gray,  text_size=size.tiny,  bgcolor=color.new(color.black, 30))
+    table.cell(ptbl, 1, 5, str.tostring(eff_adx), text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.black, 30))
+    table.cell(ptbl, 0, 6, "Trades",        text_color=color.gray,  text_size=size.tiny,  bgcolor=color.new(color.black, 30))
+    table.cell(ptbl, 1, 6, str.tostring(strategy.closedtrades), text_color=color.yellow, text_size=size.tiny, bgcolor=color.new(color.black, 30))
+
+// ============================================================================
 // ALERTS — JSON Auto Journaling
 // ============================================================================
 
@@ -308,7 +505,7 @@ string rMacd  = macdXUp ? ", MACD histogram cross up" : macdXDown ? ", MACD hist
 string rStoch = stochBull ? ", StochRSI bullish cross" : stochBear ? ", StochRSI bearish cross" : ""
 string reason = rEma + rRsi + rBb + rMacd + rStoch
 
-// JSON fragments — kept short to avoid line-length issues
+// JSON fragments
 string jTime  = str.format_time(time, "yyyy-MM-dd HH:mm", "UTC")
 string jAtr   = str.tostring(atrVal, "#.##")
 string jConf  = str.tostring(confidence, "#")
