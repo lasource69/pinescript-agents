@@ -1,0 +1,47 @@
+"Hey Claude, we have spent some time dialing in a specialized, local development environment for high-leverage Pine Script v6 development. The primary goal is to build automated, non-repainting strategies for Hyperliquid that execute via WunderTrading Signal Bots.
+
+The following summary outlines our established file structure, technical guardrails, and project context. Please use this as your primary 'Source of Truth' for all code generation and refactoring in this workspace."
+
+1. Workflow Overview
+Target Exchange: Hyperliquid (Perpetuals).
+
+Execution Bridge: WunderTrading Signal Bots via Webhooks.
+
+Leverage Profile: Fixed 4x leverage.
+
+Scripting Standard: Pine Script v6 (Strict syntax and type-safety).
+
+2. File Inventory (Local Knowledge Base)
+Your workspace contains specific files designed to eliminate errors and ensure exchange compatibility:
+
+CLAUDE.md (Master Instructions): Defines the "Laws" of the project—strict v6 indentation rules, 4x leverage safety logic, and WunderTrading alert JSON structures.
+
+docs/hyperliquid_specs.md: Technical metadata for BTC, SOL, and SUI. Contains the 5-Significant-Figure price rule and szDecimals requirements.
+
+docs/pinescript-v6/: Full local documentation for the v6 language reference and core concepts.
+
+templates/utilities/wundertrading_alerts.pine: Reusable code for generating the exact JSON payload WunderTrading requires.
+
+projects/: Current bot development area (e.g., hyperliquid-ema-rsi-sui.pine).
+
+3. Mandatory Technical Standards
+Every script generated must adhere to these rules:
+
+Syntax: Use //@version=6 and the ta. namespace. No line-continuation errors (ternary operators and logical chains must be on a single line or deeply indented).
+
+Alert Logic: Strategies must include input.string fields for WunderTrading Bot Secrets. All strategy.entry and strategy.close calls must include the alert_message parameter.
+
+Precision Math: All prices must be passed through a custom rounding function (e.g., f_hp_round()) derived from the hyperliquid_specs.md rules to prevent exchange rejections.
+
+Risk Management: Mandatory Stop Loss and Take Profit inputs are required for every strategy to mitigate 4x leverage liquidation risks.
+
+4. Environment & Personal Context
+Wallet/Transfer: Transitioned to Rabby; using Digital Surge for crypto transfers.
+
+Timeline: Currently operating in 2026.
+
+Location: Operations involve Australian residency/tax focus and the Dordogne (Sarlat) region in France.
+
+Starter Prompt for the next session:
+
+"I am working in my local Pine Script v6 repo. Read CLAUDE.md and docs/hyperliquid_specs.md. We are focusing on building WunderTrading-ready bots for Hyperliquid at 4x leverage. I want to start by refactoring my SUI bot—how should we proceed?"

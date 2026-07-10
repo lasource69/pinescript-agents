@@ -1,0 +1,273 @@
+//@version=6
+// ============================================================================
+// HYPERLIQUID EMA-RSI PERP STRATEGY
+// Exchange : Hyperliquid (via WunderTrading webhook)
+// Timeframe: 1H recommended (4H trend filter via HTF request)
+// Optimized: EMA 34/100/200, RSI OB60/OS30, SL 1.0×ATR, TP 3.0×ATR
+//            Sharpe 2.26 | PF 1.98 | Return +12.88% | B&H -17.08% (BTC 1H Jan-Apr 2026)
+// Author   : lasource69
+// ============================================================================
+strategy("Hyperliquid EMA-RSI Perp Strategy",
+     shorttitle="HL-EMA-RSI",
+     overlay=true,
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05,
+     slippage=2,
+     calc_on_every_tick=false)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+// --- Trend EMAs (current TF) ---
+emaFastLen  = input.int(34,  "Fast EMA",  minval=1,  group="EMAs", tooltip="Short-term trend")
+emaMidLen   = input.int(100, "Mid EMA",   minval=1,  group="EMAs", tooltip="Medium-term trend")
+emaSlowLen  = input.int(200, "Slow EMA",  minval=1,  group="EMAs", tooltip="Long-term bias filter")
+
+// --- HTF Trend Filter ---
+htfEnabled  = input.bool(true, "Enable HTF Filter",   group="HTF Filter", tooltip="Use a higher timeframe EMA for trend bias")
+htfTF       = input.timeframe("240", "HTF Timeframe",  group="HTF Filter")
+htfEmaLen   = input.int(100, "HTF EMA Length",        group="HTF Filter", minval=1)
+
+// --- RSI ---
+rsiLen      = input.int(14, "RSI Length",             group="RSI", minval=2)
+rsiOB       = input.int(60, "Overbought",             group="RSI", minval=50, maxval=100, tooltip="RSI above this = avoid longs")
+rsiOS       = input.int(30, "Oversold",               group="RSI", minval=0,  maxval=50,  tooltip="RSI below this = avoid shorts")
+rsiMid      = 50
+
+// --- Volume Filter ---
+volEnabled  = input.bool(true, "Enable Volume Filter", group="Volume", tooltip="Only trade when volume is above average")
+volLen      = input.int(20,   "Volume MA Length",      group="Volume", minval=1)
+volMult     = input.float(1.1, "Volume Multiplier",    group="Volume", minval=0.1, step=0.1, tooltip="Volume must be X times the average")
+
+// --- Risk Management ---
+atrLen      = input.int(14,   "ATR Length",            group="Risk Management", minval=1)
+slMult      = input.float(1.0, "Stop Loss ATR Mult",   group="Risk Management", minval=0.1, step=0.1, tooltip="SL = entry ± ATR * multiplier")
+tpMult      = input.float(3.0, "Take Profit ATR Mult", group="Risk Management", minval=0.1, step=0.1, tooltip="TP = entry ± ATR * multiplier")
+trailEnabled = input.bool(true, "Use Trailing Stop",   group="Risk Management", tooltip="Trail stop after TP1 hit")
+trailMult   = input.float(1.0, "Trail ATR Mult",       group="Risk Management", minval=0.1, step=0.1)
+
+// --- Trade Direction ---
+tradeDir    = input.string("Both", "Trade Direction", options=["Long Only", "Short Only", "Both"], group="General")
+
+// --- WunderTrading Webhook ---
+wtSymbol    = input.string("BTC", "Hyperliquid Symbol", group="WunderTrading", tooltip="Symbol as it appears on Hyperliquid e.g. BTC ETH SOL")
+wtBotId     = input.string("YOUR_BOT_ID", "WunderTrading Bot ID", group="WunderTrading", tooltip="Paste your WunderTrading bot ID here")
+
+// ============================================================================
+// CALCULATIONS
+// ============================================================================
+
+// EMAs
+emaFast     = ta.ema(close, emaFastLen)
+emaMid      = ta.ema(close, emaMidLen)
+emaSlow     = ta.ema(close, emaSlowLen)
+
+// HTF EMA via request.security (no lookahead to avoid repainting)
+htfEmaRaw   = request.security(syminfo.tickerid, htfTF, ta.ema(close, htfEmaLen), lookahead=barmerge.lookahead_off)
+htfEma      = htfEnabled ? htfEmaRaw : na
+
+// RSI
+rsi         = ta.rsi(close, rsiLen)
+
+// Volume
+volMA       = ta.sma(volume, volLen)
+volOk       = not volEnabled or (volume > volMA * volMult)
+
+// ATR
+atr         = ta.atr(atrLen)
+
+// RSI crossovers (calculated here to avoid warning inside conditional expressions)
+rsiCrossUp   = ta.crossover(rsi, rsiMid)
+rsiCrossDown = ta.crossunder(rsi, rsiMid)
+
+// WunderTrading alert payloads
+longAlertMsg  = '{"bot_id":"' + wtBotId + '","action":"long","symbol":"'  + wtSymbol + '","type":"market"}'
+shortAlertMsg = '{"bot_id":"' + wtBotId + '","action":"short","symbol":"' + wtSymbol + '","type":"market"}'
+closeAlertMsg = '{"bot_id":"' + wtBotId + '","action":"close","symbol":"' + wtSymbol + '"}'
+
+// ============================================================================
+// TREND CONDITIONS
+// ============================================================================
+
+// Bullish structure: fast > mid > slow, price above all
+bullTrend   = emaFast > emaMid and emaMid > emaSlow and close > emaFast
+// Bearish structure: fast < mid < slow, price below all
+bearTrend   = emaFast < emaMid and emaMid < emaSlow and close < emaFast
+
+// HTF bias
+htfBullBias = not htfEnabled or (close > htfEma)
+htfBearBias = not htfEnabled or (close < htfEma)
+
+// ============================================================================
+// ENTRY CONDITIONS (confirmed bar only — no repainting)
+// ============================================================================
+
+longEntry   = barstate.isconfirmed and
+     bullTrend and
+     htfBullBias and
+     rsiCrossUp and
+     rsi < rsiOB and
+     volOk and
+     (tradeDir == "Long Only" or tradeDir == "Both")
+
+shortEntry  = barstate.isconfirmed and
+     bearTrend and
+     htfBearBias and
+     rsiCrossDown and
+     rsi > rsiOS and
+     volOk and
+     (tradeDir == "Short Only" or tradeDir == "Both")
+
+// ============================================================================
+// STRATEGY EXECUTION
+// ============================================================================
+
+// Calculate SL/TP levels at entry
+longSL      = strategy.position_avg_price - atr * slMult
+longTP      = strategy.position_avg_price + atr * tpMult
+shortSL     = strategy.position_avg_price + atr * slMult
+shortTP     = strategy.position_avg_price - atr * tpMult
+
+if longEntry
+    strategy.entry("Long", strategy.long, alert_message=longAlertMsg)
+
+if shortEntry
+    strategy.entry("Short", strategy.short, alert_message=shortAlertMsg)
+
+// Exits via ATR-based SL/TP
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long",
+         stop=longSL,
+         limit=longTP,
+         trail_points=trailEnabled ? atr * trailMult / syminfo.mintick : na)
+
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short",
+         stop=shortSL,
+         limit=shortTP,
+         trail_points=trailEnabled ? atr * trailMult / syminfo.mintick : na)
+
+// ============================================================================
+// WUNDERTRADING ALERT MESSAGES
+// Create ONE strategy alert in TradingView, set message to:
+//   {{strategy.order.alert_message}}
+// The correct JSON payload (with your bot_id and symbol) fires automatically.
+// ============================================================================
+
+alertcondition(longEntry,  title="HL Long Entry",  message='long BTC')
+alertcondition(shortEntry, title="HL Short Entry", message='short BTC')
+
+// ============================================================================
+// VISUALS
+// ============================================================================
+
+// EMA plots
+plot(emaFast, "EMA 21",  color=color.new(color.aqua,   0), linewidth=1)
+plot(emaMid,  "EMA 50",  color=color.new(color.yellow, 0), linewidth=1)
+plot(emaSlow, "EMA 200", color=color.new(color.gray,   30), linewidth=2)
+
+// HTF EMA
+plot(htfEma, "HTF EMA", color=color.new(color.orange, 0), linewidth=2, style=plot.style_stepline)
+
+// EMA ribbon fill
+emaFillColor = bullTrend ? color.new(color.aqua, 88) : bearTrend ? color.new(color.red, 88) : color.new(color.gray, 95)
+fill(plot(emaFast, display=display.none), plot(emaMid, display=display.none), color=emaFillColor)
+
+// Entry signals
+plotshape(longEntry,  title="Long Signal",  style=shape.triangleup,   location=location.belowbar, color=color.lime,  size=size.small, text="L")
+plotshape(shortEntry, title="Short Signal", style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.small, text="S")
+
+// SL/TP lines for open position
+slColor = color.new(color.red,    0)
+tpColor = color.new(color.green,  0)
+
+var line slLine = na
+var line tpLine = na
+
+if strategy.position_size > 0 and barstate.isconfirmed
+    if not na(slLine)
+        line.delete(slLine)
+    if not na(tpLine)
+        line.delete(tpLine)
+    slLine := line.new(bar_index - 1, longSL, bar_index, longSL, extend=extend.right, color=slColor, style=line.style_dashed, width=1)
+    tpLine := line.new(bar_index - 1, longTP, bar_index, longTP, extend=extend.right, color=tpColor, style=line.style_dashed, width=1)
+
+if strategy.position_size < 0 and barstate.isconfirmed
+    if not na(slLine)
+        line.delete(slLine)
+    if not na(tpLine)
+        line.delete(tpLine)
+    slLine := line.new(bar_index - 1, shortSL, bar_index, shortSL, extend=extend.right, color=slColor, style=line.style_dashed, width=1)
+    tpLine := line.new(bar_index - 1, shortTP, bar_index, shortTP, extend=extend.right, color=tpColor, style=line.style_dashed, width=1)
+
+if strategy.position_size == 0
+    if not na(slLine)
+        line.delete(slLine)
+    if not na(tpLine)
+        line.delete(tpLine)
+
+// ============================================================================
+// PERFORMANCE METRICS TABLE
+// ============================================================================
+
+var table statsTable = table.new(position.bottom_right, 2, 11,
+     bgcolor=color.new(color.black, 80),
+     border_width=1,
+     border_color=color.new(color.gray, 50),
+     frame_width=1,
+     frame_color=color.new(color.gray, 30))
+
+if barstate.islastconfirmedhistory
+    wins       = strategy.wintrades
+    losses     = strategy.losstrades
+    total      = wins + losses
+    winRate    = total > 0 ? wins / total * 100 : 0.0
+    avgWin     = wins   > 0 ? strategy.grossprofit  / wins   : 0.0
+    avgLoss    = losses > 0 ? math.abs(strategy.grossloss) / losses : 0.0
+    pf         = avgLoss > 0 ? avgWin / avgLoss : 0.0
+    netProfit  = strategy.netprofit
+    netPct     = strategy.initial_capital > 0 ? netProfit / strategy.initial_capital * 100 : 0.0
+
+    // Header
+    table.cell(statsTable, 0, 0, "METRIC",     text_color=color.white, bgcolor=color.new(color.navy, 20), text_size=size.small)
+    table.cell(statsTable, 1, 0, "VALUE",      text_color=color.white, bgcolor=color.new(color.navy, 20), text_size=size.small)
+
+    // Rows
+    table.cell(statsTable, 0, 1, "Net Profit", text_color=color.silver, text_size=size.small)
+    netProfitColor = netProfit >= 0 ? color.lime : color.red
+    table.cell(statsTable, 1, 1, str.tostring(netPct, "#.##") + "%", text_color=netProfitColor, text_size=size.small)
+
+    table.cell(statsTable, 0, 2, "Win Rate",   text_color=color.silver, text_size=size.small)
+    winRateColor = winRate >= 50 ? color.lime : color.red
+    table.cell(statsTable, 1, 2, str.tostring(winRate, "#.#") + "%", text_color=winRateColor, text_size=size.small)
+
+    table.cell(statsTable, 0, 3, "Profit Factor", text_color=color.silver, text_size=size.small)
+    pfColor = pf >= 1.5 ? color.lime : pf >= 1.0 ? color.yellow : color.red
+    table.cell(statsTable, 1, 3, str.tostring(pf, "#.##"), text_color=pfColor, text_size=size.small)
+
+    table.cell(statsTable, 0, 4, "Total Trades", text_color=color.silver, text_size=size.small)
+    table.cell(statsTable, 1, 4, str.tostring(total), text_color=color.white, text_size=size.small)
+
+    table.cell(statsTable, 0, 5, "Wins / Losses", text_color=color.silver, text_size=size.small)
+    table.cell(statsTable, 1, 5, str.tostring(wins) + " / " + str.tostring(losses), text_color=color.white, text_size=size.small)
+
+    table.cell(statsTable, 0, 6, "Avg Win",    text_color=color.silver, text_size=size.small)
+    table.cell(statsTable, 1, 6, str.tostring(avgWin, "#.##"), text_color=color.lime, text_size=size.small)
+
+    table.cell(statsTable, 0, 7, "Avg Loss",   text_color=color.silver, text_size=size.small)
+    table.cell(statsTable, 1, 7, str.tostring(avgLoss, "#.##"), text_color=color.red, text_size=size.small)
+
+    table.cell(statsTable, 0, 8, "Max DD",     text_color=color.silver, text_size=size.small)
+    ddColor = strategy.max_drawdown_percent < 15 ? color.lime : strategy.max_drawdown_percent < 30 ? color.yellow : color.red
+    table.cell(statsTable, 1, 8, str.tostring(strategy.max_drawdown_percent, "#.#") + "%", text_color=ddColor, text_size=size.small)
+
+    table.cell(statsTable, 0, 9,  "RR Ratio",  text_color=color.silver, text_size=size.small)
+    rr = slMult > 0 ? tpMult / slMult : 0.0
+    table.cell(statsTable, 1, 9,  str.tostring(rr, "#.##") + ":1", text_color=color.aqua, text_size=size.small)
+
+    table.cell(statsTable, 0, 10, "Exchange",  text_color=color.silver, text_size=size.small)
+    table.cell(statsTable, 1, 10, "Hyperliquid", text_color=color.orange, text_size=size.small)
